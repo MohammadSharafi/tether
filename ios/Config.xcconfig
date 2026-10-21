@@ -1,0 +1,12 @@
+// Build settings to change for your own Apple account. Put your values in Config.local.xcconfig
+// (same folder, not committed) so they stay out of git:
+//
+//   DEVELOPMENT_TEAM = ABCDE12345          // Xcode > Settings > Accounts > your team > Team ID
+//   BUNDLE_ID_PREFIX = io.github.yourname  // any reverse-domain prefix that is yours
+//   APP_ENTITLEMENTS =                     // leave empty with a free Apple account (no push notifications)
+
+BUNDLE_ID_PREFIX = com.example
+DEVELOPMENT_TEAM =
+APP_ENTITLEMENTS = Tether.entitlements
+
+#include? "Config.local.xcconfig"

@@ -1,0 +1,6 @@
+node_modules/
+xcuserdata/
+GATES.md
+ios/Config.local.xcconfig
+*.p8
+.DS_Store
