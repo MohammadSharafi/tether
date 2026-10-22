@@ -3,6 +3,7 @@ package dev.tether.app
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -17,7 +18,7 @@ import androidx.compose.runtime.setValue
 
 sealed interface Screen {
     data object List : Screen
-    data class Chat(val id: String, val title: String?) : Screen
+    data class Chat(val id: String, val title: String?, val running: ComputerRun? = null) : Screen
     data object Settings : Screen
     data object NewSession : Screen
 }
@@ -27,7 +28,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // The app is always dark, so the status bar icons are always light.
+        enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         link.value = intent?.dataString
         val store = Store(applicationContext)
         setContent { TetherTheme { App(store, link.value) { link.value = null } } }
@@ -57,9 +59,9 @@ fun App(store: Store, link: String?, consumeLink: () -> Unit) {
 
     BackHandler(enabled = screen != Screen.List && store.configured) { screen = Screen.List }
     when (val s = screen) {
-        Screen.List -> SessionsScreen(store, open = { id, title -> screen = Screen.Chat(id, title) },
+        Screen.List -> SessionsScreen(store, open = { s -> screen = Screen.Chat(s.id, s.title, s.running) },
             settings = { screen = Screen.Settings }, newSession = { screen = Screen.NewSession })
-        is Screen.Chat -> SessionScreen(store, s.id, s.title, back = { screen = Screen.List })
+        is Screen.Chat -> SessionScreen(store, s.id, s.title, s.running, back = { screen = Screen.List })
         Screen.Settings -> SettingsScreen(store, done = { if (store.configured) screen = Screen.List })
         Screen.NewSession -> NewSessionScreen(store, back = { screen = Screen.List }, started = { id, title -> screen = Screen.Chat(id, title) })
     }

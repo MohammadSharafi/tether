@@ -31,8 +31,10 @@ data class Event(
     val oldString: String?, val newString: String?, val cost: Double?, val isError: Boolean?,
     val allow: Boolean?, val state: String?, val seq: Int?,
 ) {
-    /** Row identity: history events carry no server id. */
-    val key = Any()
+    /** Row identity: history events carry no server id. A number, because list keys must fit in a Bundle. */
+    val key: Long = nextKey.incrementAndGet()
+
+    private companion object { val nextKey = java.util.concurrent.atomic.AtomicLong() }
 }
 
 data class Detail(val state: String?, val seq: Int, val events: List<Event>)

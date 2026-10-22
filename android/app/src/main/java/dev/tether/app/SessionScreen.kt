@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -135,9 +136,10 @@ class ChatModel(private val api: Api, val id: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionScreen(store: Store, id: String, title: String?, back: () -> Unit) {
+fun SessionScreen(store: Store, id: String, title: String?, running: ComputerRun?, back: () -> Unit) {
     val api = remember(store.server, store.token) { store.api() }
-    val model = remember(id) { ChatModel(api, id) }
+    // The list already knows whether it is open on the computer, so Continue here works from the first second.
+    val model = remember(id) { ChatModel(api, id).also { it.running = running } }
     val scope = rememberCoroutineScope()
     var draft by remember { mutableStateOf("") }
     var pending by remember { mutableStateOf<String?>(null) }   // a message waiting for "Continue here"
@@ -221,8 +223,15 @@ fun SessionScreen(store: Store, id: String, title: String?, back: () -> Unit) {
                 }
             }
             // Newest at the bottom: a reversed list starts there and stays there as rows arrive.
-            LazyColumn(Modifier.fillMaxSize(), reverseLayout = true, contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // New rows keep the old row in place, so follow the newest one while you are at the bottom
+            // (not when you have scrolled up to read).
+            val listState = rememberLazyListState()
+            LaunchedEffect(model.events.size, model.streaming.isEmpty()) {
+                if (listState.firstVisibleItemIndex <= 3) listState.animateScrollToItem(0)
+            }
+            // Bottom alignment matters: a plain spacedBy() would pin a short chat to the top.
+            LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true, contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom)) {
                 model.error?.takeIf { model.events.isNotEmpty() }?.let { e ->
                     item { Row(verticalAlignment = Alignment.CenterVertically) { Text(e, color = MaterialThemeError, fontSize = 13.sp, modifier = Modifier.weight(1f)); TextButton(onClick = { attempt++ }) { Text("Try again") } } }
                 }

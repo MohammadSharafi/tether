@@ -70,7 +70,7 @@ fun ago(ms: Double): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionsScreen(store: Store, open: (String, String?) -> Unit, settings: () -> Unit, newSession: () -> Unit) {
+fun SessionsScreen(store: Store, open: (Session) -> Unit, settings: () -> Unit, newSession: () -> Unit) {
     var sessions by remember { mutableStateOf<List<Session>?>(null) }
     var plan by remember { mutableStateOf<Plan?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -80,8 +80,9 @@ fun SessionsScreen(store: Store, open: (String, String?) -> Unit, settings: () -
     LaunchedEffect(store.server, store.token, retry) {
         var tick = 0
         while (true) {
-            try { sessions = store.api().sessions(); error = null } catch (e: Exception) { error = e.message }
+            // Plan first, so the meter is in place before the list shows and rows never jump under a finger.
             if (tick % 8 == 0) plan = runCatching { store.api().plan() }.getOrNull()
+            try { sessions = store.api().sessions(); error = null } catch (e: Exception) { error = e.message }
             tick++
             delay(8_000)
         }
@@ -137,11 +138,11 @@ private fun Section(title: String) =
     Text(title, color = Muted, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, modifier = Modifier.padding(start = 6.dp, top = 8.dp))
 
 @Composable
-private fun Group(items: List<Session>, open: (String, String?) -> Unit, showFolder: Boolean) {
+private fun Group(items: List<Session>, open: (Session) -> Unit, showFolder: Boolean) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Card)) {
         items.forEachIndexed { i, s ->
             if (i > 0) HorizontalDivider(Modifier.padding(start = 64.dp), color = CardHigh)
-            Row(Modifier.fillMaxWidth().clickable { open(s.id, s.title) }.padding(14.dp), verticalAlignment = Alignment.Top) {
+            Row(Modifier.fillMaxWidth().clickable { open(s) }.padding(14.dp), verticalAlignment = Alignment.Top) {
                 Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF3E87A8)), contentAlignment = Alignment.Center) {
                     Text(s.folder.take(1).uppercase(), fontWeight = FontWeight.Bold, color = Color.White)
                 }
