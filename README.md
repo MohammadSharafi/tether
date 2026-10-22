@@ -162,6 +162,12 @@ npm run e2e     # one real session against the running server (uses a little of 
 
 `npm run e2e` uses the Sonnet model by default; set `E2E_MODEL` to change it.
 
+## Support
+
+Tether is free and open source. If it saves you time, you can support its development on [Buy Me a Coffee](https://buymeacoffee.com/mohammadsh47).
+
+<a href="https://buymeacoffee.com/mohammadsh47"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-support-e88866?logo=buymeacoffee&logoColor=white" alt="Buy me a coffee"></a>
+
 ## License
 
 Tether is released under the [MIT License](LICENSE). Third-party components and their terms are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
