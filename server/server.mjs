@@ -13,6 +13,8 @@ import { createPusher } from './push.mjs';
 import { listFolders, gitChanges, exportMarkdown, planFromUsage } from './extras.mjs';
 
 export const STATE_DIR = path.join(os.homedir(), '.tether');
+// What the user calls this computer in messages shown on the phone.
+const PLACE = process.platform === 'win32' ? 'PC' : 'Mac';
 const MAX_BODY = 25_000_000; // room for a few photos
 const EVENT_BUFFER = 500;
 const IDLE_CLOSE_MS = 30 * 60_000;
@@ -529,7 +531,7 @@ export function createApp({
       const body = await readJson(req);
       const cwd = text(body, 'cwd');
       if (!path.isAbsolute(cwd) || !fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
-        throw new HttpError(400, 'cwd must be an existing absolute directory on the Mac.');
+        throw new HttpError(400, `cwd must be an existing absolute directory on the ${PLACE}.`);
       }
       const msg = message({ ...body, text: body.text ?? body.prompt });
       const n = startLive(crypto.randomUUID(), cwd, { ...settings(body), title: clip(msg.text, 60) || path.basename(cwd) });
@@ -549,7 +551,7 @@ export function createApp({
 
     if (req.method === 'DELETE' && id && !sub) {
       if (s) throw new HttpError(409, 'Stop the session before deleting it.');
-      if (macSessions(await listAll()).has(id)) throw new HttpError(409, 'This session is running on your Mac. Stop it first.');
+      if (macSessions(await listAll()).has(id)) throw new HttpError(409, `This session is running on your ${PLACE}. Stop it first.`);
       const dir = await dirOf(id);
       await inDir(dir, () => sdk.deleteSession(id));
       return json(res, 204);
@@ -575,7 +577,7 @@ export function createApp({
       if (!target) {
         const info = await findSession(id);
         if (!info?.cwd) throw new HttpError(404, 'Session not found.');
-        if (macSessions(await listAll()).has(id)) throw new HttpError(409, 'This session is running on your Mac. Stop it there first, or use Stop on Mac.');
+        if (macSessions(await listAll()).has(id)) throw new HttpError(409, `This session is running on your ${PLACE}. Stop it there first, or use Stop on ${PLACE}.`);
         target = startLive(id, info.cwd, { resume: true, ...settings(body), title: info.customTitle ?? info.summary, dir: info.dir });
       }
       send(target, msg);
@@ -608,7 +610,7 @@ export function createApp({
     // Only processes the scan just tied to this session id are signalled; the phone never sends a pid.
     if (req.method === 'POST' && sub === 'stop-mac') {
       const mac = macSessions(await listAll()).get(id);
-      if (!mac) throw new HttpError(404, 'This session is not running on your Mac.');
+      if (!mac) throw new HttpError(404, `This session is not running on your ${PLACE}.`);
       for (const pid of mac.pids) signal(pid, 'SIGINT');
       // Claude Code in a terminal only asks for a second Ctrl-C, so whatever still runs after 3 s gets SIGTERM.
       const alive = () => mac.pids.filter((pid) => { try { signal(pid, 0); return true; } catch { return false; } });
@@ -641,7 +643,7 @@ export function createApp({
 
     if (req.method === 'GET' && sub === 'changes') {
       const cwd = s?.cwd ?? (await findSession(id))?.cwd;
-      if (!cwd || !fs.existsSync(cwd)) throw new HttpError(404, 'This session\'s folder is not on the Mac.');
+      if (!cwd || !fs.existsSync(cwd)) throw new HttpError(404, `This session's folder is not on the ${PLACE}.`);
       return json(res, 200, await changes(cwd));
     }
 

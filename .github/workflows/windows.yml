@@ -1,0 +1,34 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm test
+      # The real PowerShell process query must run and parse on Windows (no Claude processes here, so an empty list).
+      - name: Process detection smoke test
+        shell: pwsh
+        run: |
+          node -e "import('./system.mjs').then(m => { const r = m.runningSessions([]); console.log('sessions', r.size); if (!(r instanceof Map)) process.exit(1); })"
+          node -e "import('./system.mjs').then(m => { const { execFileSync } = require('node:child_process'); const out = execFileSync('powershell.exe', ['-NoProfile','-Command', m.WINDOWS_PS], { encoding: 'utf8' }); const rows = m.parseWindowsProcesses(out); console.log('node/claude processes parsed:', out ? JSON.parse(out).length ?? 1 : 0, 'claude:', rows.length); })"
+      - name: Login item dry run
+        run: node setup.mjs --dry-run

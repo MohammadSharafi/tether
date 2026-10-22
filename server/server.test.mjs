@@ -8,12 +8,14 @@ import { createApp, sumUsage, mapContent, displayInput } from './server.mjs';
 import { usageByDay, summarizeTranscript, transcriptCwd } from './usage.mjs';
 import { apnsJwt, buildPayload, buildActivityPayload, wantsNotification } from './push.mjs';
 import { listFolders, gitChanges, exportMarkdown, planFromUsage } from './extras.mjs';
-import { plist } from './setup.mjs';
-import { parseClaudeProcesses, runningSessions, followContinued, projectFolder } from './system.mjs';
+import { plist, windowsLauncher } from './setup.mjs';
+import { parseClaudeProcesses, parseWindowsProcesses, runningSessions, followContinued, projectFolder } from './system.mjs';
 import { execFileSync } from 'node:child_process';
 
 const TOKEN = 'test-token';
 const SID = '11111111-2222-3333-4444-555555555555';
+// A folder that exists on every OS (sessions can only start in a real folder).
+const TMP = os.tmpdir();
 const PNG = Buffer.from('fake-png-bytes').toString('base64');
 
 // Fake SDK: one stored session; each prompt streams a delta, asks permission for Bash, then answers
@@ -21,7 +23,7 @@ const PNG = Buffer.from('fake-png-bytes').toString('base64');
 function fakeSdk({ lastModified = 1 } = {}) {
   const sdk = {
     calls: [], verdicts: [], options: null,
-    listSessions: async () => [{ sessionId: SID, summary: 'Fix tests', cwd: '/tmp', gitBranch: 'main', lastModified }],
+    listSessions: async () => [{ sessionId: SID, summary: 'Fix tests', cwd: TMP, gitBranch: 'main', lastModified }],
     getSessionMessages: async () => [
       { type: 'user', message: { role: 'user', content: 'hi' }, parent_tool_use_id: null },
       { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'hello' }], usage: { input_tokens: 3, output_tokens: 5 } }, parent_tool_use_id: null },
@@ -92,7 +94,7 @@ async function readEvents(res, onEvent) {
 
 // Starts a session, follows its stream and answers the one permission request with `decision`.
 async function runTurn({ call, post }, startBody, decision) {
-  const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go', ...startBody })).json();
+  const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go', ...startBody })).json();
   const events = await readEvents(await call(`/sessions/${id}/events`), async (e) => {
     if (e.kind === 'permission') await post(`/sessions/${id}/permissions/${e.id}`, decision);
     return e.kind === 'result';
@@ -113,13 +115,13 @@ test('lists sessions, marks ones running on the Mac, returns history with usage'
   const dir = emptyDir();
   await withServer(async ({ call }) => {
     const list = await (await call('/sessions')).json();
-    assert.deepEqual(list[0], { id: SID, title: 'Fix tests', cwd: '/tmp', branch: 'main', updated: 1, dir, state: null });
+    assert.deepEqual(list[0], { id: SID, title: 'Fix tests', cwd: TMP, branch: 'main', updated: 1, dir, state: null });
     const detail = await (await call(`/sessions/${SID}`)).json();
     assert.deepEqual(detail.events.map((e) => e.kind), ['user', 'assistant']);
     assert.equal(detail.usage.output, 5);
   }, { dirs: [dir] });
   // Running in the desktop app, transcript just written: "On Mac", working.
-  const scan = () => new Map([[SID, { pids: [42], source: 'desktop', cwd: '/tmp', startedAt: 5 }]]);
+  const scan = () => new Map([[SID, { pids: [42], source: 'desktop', cwd: TMP, startedAt: 5 }]]);
   await withServer(async ({ call }) => {
     const s = (await (await call('/sessions')).json())[0];
     assert.equal(s.state, 'active');
@@ -137,12 +139,12 @@ test('validates input at the boundary', async () => {
     await bad('/sessions', '{bad');
     await bad('/sessions', { cwd: 'relative', prompt: 'x' });
     await bad('/sessions', { cwd: '/definitely/missing', prompt: 'x' });
-    await bad('/sessions', { cwd: '/tmp', prompt: '  ' });
-    await bad('/sessions', { cwd: '/tmp', prompt: 'x', mode: 'bypassPermissions' });
-    await bad('/sessions', { cwd: '/tmp', prompt: 'x', model: 'opus; rm -rf' });
-    await bad('/sessions', { cwd: '/tmp', prompt: 'x', images: [{ mediaType: 'image/svg+xml', data: PNG }] });
-    await bad('/sessions', { cwd: '/tmp', prompt: 'x', images: [{ mediaType: 'image/png', data: 'not base64!' }] });
-    await bad('/sessions', { cwd: '/tmp', prompt: 'x', images: Array(5).fill({ mediaType: 'image/png', data: PNG }) });
+    await bad('/sessions', { cwd: TMP, prompt: '  ' });
+    await bad('/sessions', { cwd: TMP, prompt: 'x', mode: 'bypassPermissions' });
+    await bad('/sessions', { cwd: TMP, prompt: 'x', model: 'opus; rm -rf' });
+    await bad('/sessions', { cwd: TMP, prompt: 'x', images: [{ mediaType: 'image/svg+xml', data: PNG }] });
+    await bad('/sessions', { cwd: TMP, prompt: 'x', images: [{ mediaType: 'image/png', data: 'not base64!' }] });
+    await bad('/sessions', { cwd: TMP, prompt: 'x', images: Array(5).fill({ mediaType: 'image/png', data: PNG }) });
     await bad(`/sessions/${SID}/permissions/x`, { allow: 'yes' });
     await bad(`/sessions/${SID}/permissions/x`, { allow: true, answers: ['a'] });
     await bad('/devices', { token: 'zz' });
@@ -152,7 +154,7 @@ test('validates input at the boundary', async () => {
 
 test('live session: prompt is in history, permission goes to the phone, approval resumes the turn', async () => {
   await withServer(async ({ call, post, sdk }) => {
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go', mode: 'plan', model: 'sonnet' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go', mode: 'plan', model: 'sonnet' })).json();
     assert.equal(sdk.options.permissionMode, 'plan');
     assert.equal(sdk.options.model, 'sonnet');
     assert.equal(sdk.options.includePartialMessages, true);
@@ -179,7 +181,7 @@ test('live session: prompt is in history, permission goes to the phone, approval
 
 test('a stream opened mid-reply first gets the text written so far', async () => {
   await withServer(async ({ call, post }) => {
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go' })).json();
     await new Promise((r) => setTimeout(r, 120)); // the delta has gone out to nobody; the permission is pending
     const events = await readEvents(await call(`/sessions/${id}/events`), async (e) => e.kind === 'delta');
     assert.deepEqual(events.at(-1), { kind: 'delta', text: 'thinking…' });
@@ -208,7 +210,7 @@ test('photos are sent as image blocks before the text', async () => {
 
 test('mode and model switch on a live session; rename; delete refused while live', async () => {
   await withServer(async ({ post, call, sdk }) => {
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go' })).json();
     const r = await (await post(`/sessions/${id}/settings`, { mode: 'acceptEdits', model: 'default' })).json();
     assert.deepEqual(r, { mode: 'acceptEdits', model: 'default', effort: 'default' });
     assert.deepEqual(sdk.calls.slice(0, 2), [['mode', 'acceptEdits'], ['model', undefined]]);
@@ -229,7 +231,7 @@ test('pushes go out only when no one is watching the session', async () => {
     assert.equal((await post('/devices', { token: 'a'.repeat(64), sandbox: true })).status, 204);
     assert.equal((await (await call('/info')).json()).push, true);
     // Nobody is streaming: the permission request becomes a push with the request id for lock-screen actions.
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go' })).json();
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(sent[0].kind, 'permission');
     assert.equal(sent[0].sessionId, id);
@@ -312,7 +314,7 @@ test('mapContent: text, tools with diff input, harness messages as meta, images 
   assert.equal(displayInput('ExitPlanMode', { plan: '# Plan' }).plan, '# Plan');
 });
 
-test('launchd plist is valid and runs this server at login with the user PATH', () => {
+test('launchd plist is valid and runs this server at login with the user PATH', { skip: process.platform !== 'darwin' && 'macOS only' }, () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'plist-')), 'a.plist');
   fs.writeFileSync(file, plist());
   assert.match(execFileSync('plutil', ['-lint', file], { encoding: 'utf8' }), /OK/);
@@ -373,7 +375,7 @@ test('running sessions: Terminal sessions without an id match the newest transcr
   fs.writeFileSync(old, '');
   fs.utimesSync(old, new Date(0), new Date(0));
   const cwdOf = () => ({ 398: '/Users/me/work', 500: '/Users/me/R.O.A.D. app', 510: '/nowhere' });
-  const running = runningSessions([dir], { ps: PS, cwdOf, excludeParent: 4242 });
+  const running = runningSessions([dir], { ps: PS, cwdOf, excludeParent: 4242, platform: 'darwin' });
   assert.deepEqual([...running.keys()].sort(), ['11111111-2222-3333-4444-555555555555', 'aaaaaaaa-0000-0000-0000-000000000000', 'b9ebbf56-23d0-4892-8c7e-8e15a2ea6188']);
   assert.deepEqual(running.get('b9ebbf56-23d0-4892-8c7e-8e15a2ea6188').pids, [398]);
   assert.equal(running.get('aaaaaaaa-0000-0000-0000-000000000000').source, 'terminal');
@@ -382,7 +384,7 @@ test('running sessions: Terminal sessions without an id match the newest transcr
 
 test('stop on Mac signals only the processes running that session; continuing it from the phone waits until it stops', async () => {
   const signals = [];
-  const scan = () => new Map([[SID, { pids: [398, 399], source: 'desktop', cwd: '/tmp', startedAt: 1 }]]);
+  const scan = () => new Map([[SID, { pids: [398, 399], source: 'desktop', cwd: TMP, startedAt: 1 }]]);
   await withServer(async ({ post, call }) => {
     assert.equal((await post(`/sessions/${SID}/messages`, { text: 'hi' })).status, 409);
     assert.equal((await call(`/sessions/${SID}`, { method: 'DELETE' })).status, 409);
@@ -399,7 +401,7 @@ test('every sessions folder is listed; a session resumes with its own folder; lo
   const work = emptyDir(), home = emptyDir();
   const sdk = fakeSdk();
   const ids = { [work]: '33333333-2222-3333-4444-555555555555', [home]: '44444444-2222-3333-4444-555555555555' };
-  sdk.listSessions = async () => [{ sessionId: ids[process.env.CLAUDE_CONFIG_DIR], summary: 's', cwd: '/tmp', lastModified: ids[process.env.CLAUDE_CONFIG_DIR] === ids[home] ? 2 : 1 }];
+  sdk.listSessions = async () => [{ sessionId: ids[process.env.CLAUDE_CONFIG_DIR], summary: 's', cwd: TMP, lastModified: ids[process.env.CLAUDE_CONFIG_DIR] === ids[home] ? 2 : 1 }];
   const auth = async (d) => ({ loggedIn: d === home, authMethod: d === home ? 'claude.ai' : 'none' });
   await withServer(async ({ call, post }) => {
     const list = await (await call('/sessions')).json();
@@ -425,7 +427,7 @@ test('a login failure from Claude becomes a clear notice', async () => {
     return Object.assign(run(), { interrupt: async () => {} });
   };
   await withServer(async ({ call, post }) => {
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go' })).json();
     const events = await readEvents(await call(`/sessions/${id}/events`), async (e) => e.kind === 'result');
     assert.deepEqual(events.find((e) => e.kind === 'notice'), { kind: 'notice', status: 'auth', seq: 3 });
   }, { sdk });
@@ -444,8 +446,8 @@ test('usage adds up every sessions folder', () => {
 
 test('effort: set when starting, changed live, validated', async () => {
   await withServer(async ({ post, sdk }) => {
-    assert.equal((await post('/sessions', { cwd: '/tmp', prompt: 'x', effort: 'huge' })).status, 400);
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go', effort: 'low' })).json();
+    assert.equal((await post('/sessions', { cwd: TMP, prompt: 'x', effort: 'huge' })).status, 400);
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go', effort: 'low' })).json();
     assert.equal(sdk.options.effort, 'low');
     assert.deepEqual(await (await post(`/sessions/${id}/settings`, { effort: 'max' })).json(), { mode: 'default', effort: 'max' });
     assert.deepEqual(sdk.calls.at(-1), ['flags', { effortLevel: 'max' }]);
@@ -453,7 +455,7 @@ test('effort: set when starting, changed live, validated', async () => {
     assert.deepEqual(sdk.calls.at(-1), ['flags', { effortLevel: null }]);
   });
   await withServer(async ({ post, sdk }) => {
-    await post('/sessions', { cwd: '/tmp', prompt: 'go' });
+    await post('/sessions', { cwd: TMP, prompt: 'go' });
     assert.equal('effort' in sdk.options, false, 'no effort sent unless chosen');
   });
 });
@@ -531,7 +533,7 @@ test('slash commands come from a short probe process when the session is not run
       { name: 'review', description: 'Review code', builtin: false },
     ]);
     assert.ok(sdk.calls.some((c) => c[0] === 'close'), 'probe process is closed');
-    assert.equal(sdk.options.cwd, '/tmp');
+    assert.equal(sdk.options.cwd, TMP);
     const before = sdk.calls.length;
     await call(`/sessions/${SID}/commands`);
     assert.equal(sdk.calls.length, before, 'cached');
@@ -566,7 +568,7 @@ test('notification choices per phone; Live Activity follows the session', async 
   await withServer(async ({ post, call }) => {
     assert.equal((await post('/devices', { token: 'b'.repeat(64), prefs: { done: false } })).status, 204);
     assert.deepEqual(registered[0], ['b'.repeat(64), false, { needsYou: true, done: false }]);
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go' })).json();
     assert.equal((await post(`/sessions/${id}/activity`, { token: 'nope' })).status, 400);
     assert.equal((await post(`/sessions/${id}/activity`, { token: 'c'.repeat(64), sandbox: true })).status, 204);
     await readEvents(await call(`/sessions/${id}/events`), async (e) => {
@@ -594,7 +596,7 @@ test('a model that needs usage credits becomes a clear notice', async () => {
     return Object.assign(run(), { interrupt: async () => {} });
   };
   await withServer(async ({ call, post }) => {
-    const { id } = await (await post('/sessions', { cwd: '/tmp', prompt: 'go' })).json();
+    const { id } = await (await post('/sessions', { cwd: TMP, prompt: 'go' })).json();
     const events = await readEvents(await call(`/sessions/${id}/events`), async (e) => e.kind === 'result');
     assert.equal(events.find((e) => e.kind === 'notice')?.status, 'credits');
   }, { sdk });
@@ -633,11 +635,60 @@ test('a continued session is shown as running under its newest copy', () => {
 
 test('Stop on Mac follows up with SIGTERM when Ctrl-C does not end the process', async () => {
   const signals = [];
-  const scan = () => new Map([[SID, { pids: [398], source: 'terminal', cwd: '/tmp', startedAt: 0 }]]);
+  const scan = () => new Map([[SID, { pids: [398], source: 'terminal', cwd: TMP, startedAt: 0 }]]);
   const sdk = fakeSdk();
-  sdk.listSessions = async () => [{ sessionId: SID, summary: 's', cwd: '/tmp', lastModified: 1 }];
+  sdk.listSessions = async () => [{ sessionId: SID, summary: 's', cwd: TMP, lastModified: 1 }];
   await withServer(async ({ post }) => {
     assert.deepEqual(await (await post(`/sessions/${SID}/stop-mac`, {})).json(), { ok: true, stopped: 1 });
     assert.deepEqual(signals.filter(([, sig]) => sig !== 0), [[398, 'SIGINT'], [398, 'SIGTERM']]);
   }, { scan, sdk, signal: (pid, sig) => signals.push([pid, sig]) });
+});
+
+test('Windows processes: desktop app and terminal sessions from Win32_Process JSON', () => {
+  const id = 'aaaaaaaa-1111-2222-3333-444444444444';
+  // Windows PowerShell 5.1 writes dates as /Date(ms)/; the desktop app runs a wrapper and a child with the same arguments.
+  const ps51 = JSON.stringify([
+    { ProcessId: 100, ParentProcessId: 4, CreationDate: '/Date(1792600000000)/',
+      CommandLine: `"C:\\Users\\dev\\AppData\\Roaming\\Claude\\claude-code\\2.1.295\\claude.exe" --output-format stream-json --resume=${id}` },
+    { ProcessId: 101, ParentProcessId: 100, CreationDate: '/Date(1792600000100)/',
+      CommandLine: `"C:\\Users\\dev\\AppData\\Roaming\\Claude\\claude-code\\2.1.295\\claude.exe" --output-format stream-json --resume=${id}` },
+    { ProcessId: 200, ParentProcessId: 50, CreationDate: '/Date(1792600500000)/',
+      CommandLine: 'C:\\Users\\dev\\.local\\bin\\claude.exe --resume bbbbbbbb-1111-2222-3333-444444444444' },
+    // npm install: node running cli.js; and unrelated node and Claude desktop processes
+    { ProcessId: 300, ParentProcessId: 60, CreationDate: '/Date(1792600900000)/',
+      CommandLine: '"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js' },
+    { ProcessId: 400, ParentProcessId: 60, CreationDate: '/Date(1792600900000)/', CommandLine: '"C:\\Program Files\\nodejs\\node.exe" server.js' },
+    { ProcessId: 500, ParentProcessId: 1, CreationDate: '/Date(1792600900000)/', CommandLine: '"C:\\Users\\dev\\AppData\\Local\\AnthropicClaude\\app-1.0\\Claude.exe"' },
+  ]);
+  const rows = parseWindowsProcesses(ps51);
+  assert.deepEqual(rows.map((r) => [r.pid, r.source, r.sessionId ?? null]), [
+    [100, 'desktop', id], [200, 'terminal', 'bbbbbbbb-1111-2222-3333-444444444444'], [300, 'terminal', null],
+  ]);
+  assert.equal(rows[0].startedAt, 1792600000000);
+  // PowerShell 7 writes ISO dates, and a single process comes back as an object, not an array.
+  const ps7 = JSON.stringify({ ProcessId: 7, ParentProcessId: 1, CreationDate: '2026-10-22T09:00:00+00:00', CommandLine: `claude.exe --resume=${id}` });
+  assert.deepEqual(parseWindowsProcesses(ps7).map((r) => [r.pid, r.startedAt]), [[7, Date.parse('2026-10-22T09:00:00+00:00')]]);
+  assert.deepEqual(parseWindowsProcesses(''), []);
+  assert.deepEqual(parseWindowsProcesses('not json'), []);
+  // runningSessions on Windows: by --resume id; a session without an id cannot be matched to a folder there.
+  const running = runningSessions([], { platform: 'win32', winJson: ps51, excludeParent: 0 });
+  assert.deepEqual([...running.keys()].sort(), [id, 'bbbbbbbb-1111-2222-3333-444444444444']);
+  assert.deepEqual(running.get(id).pids, [100]);
+});
+
+test('Windows login item: hidden Startup launcher that restarts the server', () => {
+  const w = windowsLauncher({ node: 'C:\\Program Files\\nodejs\\node.exe', dir: 'C:\\Users\\dev\\tether\\server', state: 'C:\\Users\\dev\\.tether',
+    env: { PORT: '8787', CLAUDE_CONFIG_DIR: 'C:\\Users\\dev\\.claude-100%' } });
+  const lines = w.cmd.split('\r\n');
+  assert.equal(w.cmdPath, 'C:\\Users\\dev\\.tether\\start.cmd');
+  assert.ok(lines.includes('set "PORT=8787"'));
+  assert.ok(lines.includes('set "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude-100%%"'), 'percent signs escaped for cmd');
+  assert.ok(lines.includes('cd /d "C:\\Users\\dev\\tether\\server"'));
+  const run = lines.indexOf(':loop');
+  assert.equal(lines[run + 1], '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\dev\\tether\\server\\server.mjs" >> "C:\\Users\\dev\\.tether\\server.log" 2>&1');
+  assert.equal(lines[run + 3], 'goto loop');
+  // hidden window (style 0), not waiting
+  assert.equal(w.vbs, 'CreateObject("WScript.Shell").Run """C:\\Users\\dev\\.tether\\start.cmd""", 0, False\r\n');
+  // without CLAUDE_CONFIG_DIR no empty variable is set
+  assert.ok(!windowsLauncher({ env: {} }).cmd.includes('CLAUDE_CONFIG_DIR'));
 });

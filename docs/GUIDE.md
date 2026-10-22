@@ -1,20 +1,20 @@
 # Tether setup guide
 
-This guide takes you from nothing to Tether running on your iPhone. It takes about 20 minutes, most of it waiting for installs.
+This guide takes you from nothing to Tether running on your phone. It takes about 20 minutes, most of it waiting for installs.
 
 You set up two things:
 
-1. **The Tether server on your Mac.** It reads your Claude Code sessions and runs the ones you continue from the phone.
-2. **The Tether app on your iPhone.** You build it with Xcode, because Tether is not in the App Store.
+1. **The Tether server on your computer**, a Mac or a Windows PC. It reads your Claude Code sessions and runs the ones you continue from the phone.
+2. **The Tether app on your phone**, an iPhone or an Android phone. You build it yourself, because Tether is not in an app store.
 
-Tailscale connects them, so the phone reaches your Mac from anywhere and nobody else can.
+Any phone works with any computer. Tailscale connects them, so the phone reaches your computer from anywhere and nobody else can. The steps below say "Mac"; where Windows differs, a **Windows** note says how.
 
 **Contents**
 
 1. [Before you start](#1-before-you-start)
 2. [Install the server on your Mac](#2-install-the-server-on-your-mac)
 3. [Connect the Mac and the phone with Tailscale](#3-connect-the-mac-and-the-phone-with-tailscale)
-4. [Build the app and install it on your iPhone](#4-build-the-app-and-install-it-on-your-iphone)
+4. [Build the app and install it on your iPhone](#4-build-the-app-and-install-it-on-your-iphone), or [on your Android phone](#4b-build-the-app-and-install-it-on-your-android-phone)
 5. [Pair the app with your Mac](#5-pair-the-app-with-your-mac)
 6. [Using Tether](#6-using-tether)
 7. [Optional: push notifications and Live Activity](#7-optional-push-notifications-and-live-activity)
@@ -50,7 +50,7 @@ You can start free and switch later.
 
 ## 2. Install the server on your Mac
 
-Open Terminal and run:
+Open Terminal (on Windows: PowerShell) and run:
 
 ```bash
 git clone https://github.com/MohammadSharafi/tether.git
@@ -67,6 +67,8 @@ npm run setup
 
 The server itself listens only on `127.0.0.1:8787`. Nothing is opened to your local network or the internet.
 
+> **Windows:** instead of a launchd item, setup writes a hidden launcher, `Tether.vbs`, into your Startup folder (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`). It runs `%USERPROFILE%\.tether\start.cmd`, which starts the server and restarts it if it stops. No admin rights are needed and no window appears. Install [Node.js](https://nodejs.org), [Git](https://git-scm.com/download/win) and Claude Code first, and run `claude` once to log in.
+
 > **If setup says "Serve is not enabled on your tailnet":** open the link it prints, approve it in the Tailscale admin page, then run `npm run setup` again.
 
 > **Custom Claude Code folder?** If you use `CLAUDE_CONFIG_DIR`, run setup with it: `CLAUDE_CONFIG_DIR=~/.claude-work npm run setup`. Tether lists sessions from every `~/.claude*` folder either way.
@@ -77,7 +79,7 @@ Check that it runs:
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8787/info
 ```
 
-It prints `401`. That's the right answer: the server is up and wants a token.
+It prints `401`. That's the right answer: the server is up and wants a token. (On Windows, use `curl.exe` instead of `curl` in PowerShell.)
 
 ---
 
@@ -128,16 +130,36 @@ The first time, the iPhone may refuse to open the app: go to Settings › Genera
 
 ---
 
+## 4b. Build the app and install it on your Android phone
+
+1. On the phone, turn on **Developer options** (Settings › About phone › tap **Build number** 7 times), then **USB debugging** in Settings › System › Developer options. Connect the phone with a cable and allow the computer when asked.
+2. Build and install, with either:
+   - **Android Studio:** open the `android/` folder, wait for it to finish syncing, pick your phone at the top and press **Run**.
+   - **A terminal** (needs JDK 17 and the Android SDK, which Android Studio installs):
+
+     ```bash
+     cd tether/android
+     ./gradlew assembleDebug
+     adb install app/build/outputs/apk/debug/app-debug.apk
+     ```
+
+     On Windows, use `gradlew.bat assembleDebug`.
+3. Open **Tether** on the phone and continue with step 5.
+
+Before you share your own build with anyone, give it your own id: add `tether.applicationId=io.github.yourname.tether` to `android/gradle.properties`.
+
+---
+
 ## 5. Pair the app with your Mac
 
 <img src="screenshots/settings.png" width="240" align="right" alt="Settings with server address, Test connection and notification switches">
 
 1. On the Mac, show the QR code: `cd tether/server && npm run pair`.
-2. On the iPhone, open the **Camera** and point it at the QR code. Tap the Tether banner.
+2. On the phone, open the **Camera** and point it at the QR code. Tap the Tether banner (Android: tap the link the camera or Google Lens shows).
 3. Tether opens Settings and asks **Connect to this Mac?** Check the address, then tap **Connect**.
 4. Tap **Test connection**. It says "Connected. N sessions."
 
-**No camera handy?** In Settings, under "Or enter it by hand", type the server address (`https://<your-mac>.<your-tailnet>.ts.net`) and the token. The token is in `~/.tether/token` on the Mac.
+**No camera handy?** In Settings, under "Or enter it by hand", type the server address (`https://<your-mac>.<your-tailnet>.ts.net`) and the token. The token is in `~/.tether/token` on the Mac (Windows: `%USERPROFILE%\.tether\token`).
 
 The token works like a password for your Mac. Don't share the QR code or the token.
 
@@ -244,7 +266,7 @@ git pull
 cd server && npm install && npm run setup
 ```
 
-Then press Run in Xcode to update the app.
+Then press Run in Xcode (or Android Studio) to update the app.
 
 Restarting the server ends any session you are running from the phone. The next message resumes it.
 
@@ -257,7 +279,9 @@ tailscale serve --https=443 off
 rm -rf ~/.tether
 ```
 
-Then delete the app from the iPhone.
+Then delete the app from the phone.
+
+**Windows:** `node setup.mjs --uninstall` stops the server and removes the Startup launcher. Remove the state folder with `Remove-Item -Recurse $HOME\.tether`.
 
 ---
 
