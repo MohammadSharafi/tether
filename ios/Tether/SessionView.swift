@@ -17,7 +17,12 @@ final class SessionModel {
     var error: String?
     var loaded = false
     private var lastSeq = 0
-    private var stream: Task<Void, Never>?
+    // Owned by the model, not the view: SwiftUI's split view can report the screen as gone while it is still
+    // showing, which used to cancel the load and leave the spinner up. These end in stop() or deinit.
+    @ObservationIgnored nonisolated(unsafe) private var stream: Task<Void, Never>?
+    @ObservationIgnored nonisolated(unsafe) private var life: Task<Void, Never>?
+    /// Set by the view: the session runs in Terminal or the desktop app, so re-read it now and then.
+    @ObservationIgnored var watchMac = false
     private var client: Client?
     private var id = ""
 
@@ -139,9 +144,43 @@ final class SessionModel {
         do { try await work(client) } catch { self.error = error.localizedDescription }
     }
 
+    /// Loads the session (retrying until it works), then keeps a session that runs on the Mac up to date.
+    /// `fresh` drops a load that may be hanging and starts over.
+    func start(_ client: Client, id: String, fresh: Bool = false) {
+        if fresh { life?.cancel(); life = nil }
+        guard life == nil else { return }
+        life = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await self.load(client, id: id) { break }
+                try? await Task.sleep(for: .seconds(3))
+            }
+            var watched = false
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                guard let self, !Task.isCancelled else { return }
+                if self.watchMac {
+                    await self.refresh()
+                    watched = true
+                } else if watched {
+                    // It stopped running on the Mac: read the final transcript once.
+                    watched = false
+                    if !self.isLive { await self.load(client, id: id) }
+                }
+            }
+        }
+    }
+
     func stop() {
+        life?.cancel()
+        life = nil
         stream?.cancel()
         stream = nil
+    }
+
+    deinit {
+        life?.cancel()
+        stream?.cancel()
     }
 
     private func follow() {
@@ -272,15 +311,14 @@ struct SessionView: View {
         .sheet(item: $share) { ShareSheet(url: $0.url).presentationDetents([.medium, .large]) }
         .onChange(of: draft) { if draft.hasPrefix("/") && commands == nil { Task { await loadCommands() } } }
         .onAppear { model.title = shownTitle ?? title ?? "Session" }
-        // Loads once per visit, so a moment of "inactive" (an alert, Control Center) never cancels it.
-        // A new attempt (back from the background, Try again) cancels a load that may be hanging.
-        .task(id: loadAttempt) {
-            // A phone on the move drops requests now and then: keep trying until the session loads.
-            while !Task.isCancelled, !(await model.load(client, id: id)) {
-                try? await Task.sleep(for: .seconds(3))
-            }
+        .onAppear {
+            model.watchMac = runningElsewhere
+            model.start(client, id: id)
         }
-        // Back from the background: the event stream was stopped, so read the session again.
+        .onChange(of: runningElsewhere) { model.watchMac = runningElsewhere }
+        // Try again: drop a load that may be hanging and start over.
+        .onChange(of: loadAttempt) { model.start(client, id: id, fresh: true) }
+        // The background stops the event stream; coming back reads the session again.
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { model.stop(); backgrounded = true }
             if phase == .active && backgrounded {
@@ -288,17 +326,6 @@ struct SessionView: View {
                 loadAttempt += 1
             }
         }
-        // Follow a session that runs in Terminal or the desktop app by re-reading its transcript.
-        // Kept apart from the load above, so the Mac status flipping never cancels the first load.
-        .task(id: runningElsewhere) {
-            while runningElsewhere && !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
-                if scenePhase == .active && model.loaded { await model.refresh() }
-            }
-            // It stopped running on the Mac: read the final transcript once.
-            if !Task.isCancelled && model.loaded && !model.isLive { await model.load(client, id: id) }
-        }
-        .onDisappear { model.stop() }
     }
 
     private func loadCommands() async {
@@ -376,6 +403,7 @@ struct SessionView: View {
 
     // Chat-style list in natural order, kept pinned to the newest event.
     private var transcript: some View {
+        GeometryReader { geo in
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -398,6 +426,9 @@ struct SessionView: View {
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding()
+                // A short chat still fills the screen, with its messages at the bottom, so "the bottom"
+                // is one fixed scroll position instead of one the scroll view has to guess.
+                .frame(minHeight: geo.size.height, alignment: .bottom)
             }
             .defaultScrollAnchor(.bottom)
             .modifier(StayAtBottom())
@@ -411,6 +442,7 @@ struct SessionView: View {
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
+        }
         }
     }
 
