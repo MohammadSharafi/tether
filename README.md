@@ -1,5 +1,8 @@
 # Tether
 
+[![Tests](https://github.com/MohammadSharafi/tether/actions/workflows/test.yml/badge.svg)](https://github.com/MohammadSharafi/tether/actions/workflows/test.yml)
+[![Windows](https://github.com/MohammadSharafi/tether/actions/workflows/windows.yml/badge.svg)](https://github.com/MohammadSharafi/tether/actions/workflows/windows.yml)
+
 Watch and drive the Claude Code sessions on your Mac or Windows PC from your iPhone or Android phone.
 
 Tether is two small pieces that you run yourself:
