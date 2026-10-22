@@ -1,4 +1,4 @@
-// What Claude Code is doing on this Mac: its sessions folders, running processes and login state.
+// What Claude Code is doing on this computer (macOS or Windows): its sessions folders, running processes and login state.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,9 +36,38 @@ export function parseClaudeProcesses(psOutput, now = Date.now()) {
       source: /claude\.app\/Contents\/MacOS\/claude|\.claude-instances|claude-desktop/.test(command) ? 'desktop' : 'terminal',
     });
   }
-  // The desktop app runs each session as a wrapper plus a child with the same arguments: keep the outermost.
+  return outermost(rows);
+}
+
+// The desktop app runs each session as a wrapper plus a child with the same arguments: keep the outermost.
+function outermost(rows) {
   const pids = new Set(rows.map((r) => r.pid));
   return rows.filter((r) => !pids.has(r.ppid));
+}
+
+// PowerShell query for Claude Code processes on Windows; prints Win32_Process rows as JSON.
+export const WINDOWS_PS = "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | "
+  + 'Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | ConvertTo-Json -Compress';
+
+// Parses WINDOWS_PS output. CreationDate is "/Date(ms)/" in Windows PowerShell 5.1 and an ISO date in PowerShell 7.
+export function parseWindowsProcesses(json, now = Date.now()) {
+  let list;
+  try { list = JSON.parse(json || '[]'); } catch { return []; }
+  const rows = [];
+  for (const p of Array.isArray(list) ? list : [list]) {
+    const command = p?.CommandLine ?? '';
+    const exe = command.match(/^"([^"]+)"|^(\S+)/)?.slice(1).find(Boolean) ?? '';
+    // Case matters: the CLI is claude.exe, the desktop app itself is Claude.exe.
+    if (!/(^|[\\/])claude\.exe$/.test(exe) && !/claude-code[\\/]cli\.js/i.test(command)) continue;
+    const date = typeof p.CreationDate === 'string' ? p.CreationDate : p.CreationDate?.value ?? p.CreationDate?.DateTime;
+    const ms = Number(String(date ?? '').match(/\/Date\((\d+)/)?.[1]) || Date.parse(date) || now;
+    rows.push({
+      pid: Number(p.ProcessId), ppid: Number(p.ParentProcessId), command, startedAt: ms,
+      sessionId: command.match(/--(?:resume|session-id)[= ]"?([0-9a-f-]{36})/)?.[1],
+      source: /AnthropicClaude|[\\/]Claude[\\/]claude-code|\.claude-instances|claude-desktop/i.test(command) ? 'desktop' : 'terminal',
+    });
+  }
+  return outermost(rows);
 }
 
 function cwds(pids) {
@@ -76,12 +105,18 @@ function newestTranscript(dirs, cwd, since) {
  * { pids, source: 'desktop' | 'terminal', cwd, startedAt }.
  * A Terminal session started without --resume is matched to the newest transcript in its folder.
  */
-export function runningSessions(dirs, { ps, cwdOf = cwds, excludeParent = process.pid } = {}) {
-  let out;
-  try { out = ps ?? execFileSync('ps', ['-axo', 'pid=,ppid=,etime=,command='], { encoding: 'utf8' }); }
-  catch { return new Map(); }
-  const procs = parseClaudeProcesses(out).filter((p) => p.ppid !== excludeParent);
-  const dirOf = cwdOf(procs.map((p) => p.pid));
+export function runningSessions(dirs, { ps, winJson, cwdOf = cwds, excludeParent = process.pid, platform = process.platform } = {}) {
+  let procs;
+  try {
+    if (platform === 'win32') {
+      procs = parseWindowsProcesses(winJson ?? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_PS], { encoding: 'utf8', windowsHide: true }));
+    } else {
+      procs = parseClaudeProcesses(ps ?? execFileSync('ps', ['-axo', 'pid=,ppid=,etime=,command='], { encoding: 'utf8' }));
+    }
+  } catch { return new Map(); }
+  procs = procs.filter((p) => p.ppid !== excludeParent);
+  // shortcut: Windows has no lsof, so a terminal session started without --resume is not matched to a folder.
+  const dirOf = platform === 'win32' ? {} : cwdOf(procs.map((p) => p.pid));
   const sessions = new Map();
   for (const p of procs) {
     const cwd = dirOf[p.pid];
@@ -118,7 +153,7 @@ export function followContinued(running, list, skip = new Set()) {
 // `claude auth status --json` for one config folder; null when the claude command is not installed.
 export function loginStatus(dir) {
   return new Promise((resolve) => {
-    execFile('claude', ['auth', 'status', '--json'], { env: { ...process.env, CLAUDE_CONFIG_DIR: dir }, timeout: 15_000 }, (err, stdout) => {
+    execFile('claude', ['auth', 'status', '--json'], { env: { ...process.env, CLAUDE_CONFIG_DIR: dir }, timeout: 15_000, shell: process.platform === 'win32', windowsHide: true }, (err, stdout) => {
       try { resolve(JSON.parse(stdout)); } catch { resolve(err?.code === 'ENOENT' ? null : { loggedIn: false }); }
     });
   });

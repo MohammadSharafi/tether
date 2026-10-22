@@ -1,13 +1,16 @@
 # Tether
 
-Watch and drive the Claude Code sessions on your Mac from your iPhone.
+Watch and drive the Claude Code sessions on your Mac or Windows PC from your iPhone or Android phone.
 
 Tether is two small pieces that you run yourself:
 
-- **`server/`**: a Node server on your Mac. It lists your local Claude Code sessions, reads token usage from their transcripts, sees which sessions are running in the desktop app or a terminal, and runs sessions you start from the phone through the Claude Agent SDK.
+- **`server/`**: a Node server on your computer (macOS or Windows). It lists your local Claude Code sessions, reads token usage from their transcripts, sees which sessions are running in the desktop app or a terminal, and runs sessions you start from the phone through the Claude Agent SDK.
 - **`ios/`**: a SwiftUI app for iPhone and iPad (iOS 17+).
+- **`android/`**: a Jetpack Compose app for Android phones (Android 8.0+).
 
-Everything stays between your Mac and your phone. There is no Tether cloud service and no account.
+Any phone works with any computer: an Android phone with a Mac, an iPhone with a Windows PC, and so on.
+
+Everything stays between your computer and your phone. There is no Tether cloud service and no account.
 
 <p align="center">
   <img src="docs/screenshots/sessions.png" width="200" alt="Session list with plan limits, a session that needs approval and one open in the desktop app">
@@ -35,19 +38,22 @@ Everything stays between your Mac and your phone. There is no Tether cloud servi
 
 ## Requirements
 
-- A Mac with macOS 14 or later (developed on Apple silicon; Intel is untested).
+- A computer: a Mac with macOS 14 or later (developed on Apple silicon; Intel is untested), or a PC with Windows 10 or 11.
 - [Node.js](https://nodejs.org) 20.11 or later.
-- [Claude Code](https://code.claude.com/docs) installed and logged in on the Mac (`claude`, then `/login`). Tether uses the same login; it never asks for or stores your credentials.
-- [Tailscale](https://tailscale.com/download) on the Mac and on the iPhone, signed in to the same account. It connects the phone to the Mac from anywhere, encrypted.
-- Xcode 16 or later and an Apple ID to install the app on your phone:
+- [Claude Code](https://code.claude.com/docs) installed and logged in on the computer (`claude`, then `/login`). Tether uses the same login; it never asks for or stores your credentials.
+- [Tailscale](https://tailscale.com/download) on the computer and on the phone, signed in to the same account. It connects the phone to the computer from anywhere, encrypted.
+- For the iPhone app: a Mac with Xcode 16 or later and an Apple ID:
   - a **free Apple ID** works, but iOS stops the app after 7 days until you build it again, and push notifications are not available;
   - a **paid Apple Developer account** gives longer installs, push notifications and Live Activity updates while the app is closed.
+- For the Android app: [Android Studio](https://developer.android.com/studio) (on Mac, Windows or Linux) to build it, or the JDK 17 and Android SDK for a command-line build.
 
 ## Setup
 
 The short version is below. The [Setup guide](docs/GUIDE.md) covers every step in detail, with troubleshooting.
 
-### 1. Mac
+### 1. Computer
+
+On a Mac, in Terminal; on Windows, in PowerShell:
 
 ```bash
 git clone https://github.com/MohammadSharafi/tether.git
@@ -58,15 +64,15 @@ npm run setup
 
 `npm run setup`:
 
-- installs a login item (`~/Library/LaunchAgents/dev.tether.server.plist`) that starts the server when you log in and restarts it if it stops;
+- installs a login item that starts the server when you log in and restarts it if it stops: on macOS `~/Library/LaunchAgents/dev.tether.server.plist`; on Windows a hidden `Tether.vbs` in your Startup folder that runs `~/.tether/start.cmd` (no admin rights needed);
 - runs `tailscale serve --bg 8787`, which makes the server reachable from your devices at `https://<your-mac>.<tailnet>.ts.net` (and only from devices in your tailnet);
 - prints a QR code for pairing.
 
 Show the QR code again any time with `npm run pair`. Remove the login item with `node setup.mjs --uninstall`.
 
-If you use a custom Claude Code config folder, run setup with it, for example `CLAUDE_CONFIG_DIR=~/.claude-work npm run setup`.
+If you use a custom Claude Code config folder, run setup with it, for example `CLAUDE_CONFIG_DIR=~/.claude-work npm run setup` (in PowerShell: `$env:CLAUDE_CONFIG_DIR="$HOME\.claude-work"; npm run setup`).
 
-### 2. iPhone
+### 2a. iPhone
 
 1. Create `ios/Config.local.xcconfig` (it is git-ignored) with your own values:
 
@@ -79,6 +85,21 @@ If you use a custom Claude Code config folder, run setup with it, for example `C
    `DEVELOPMENT_TEAM` is your Team ID (Xcode › Settings › Accounts › your Apple ID). Leave `APP_ENTITLEMENTS` empty with a free Apple ID; set it to `Tether.entitlements` with a paid account to enable push notifications.
 2. Open `ios/Tether.xcodeproj` in Xcode and run the **Tether** scheme on your iPhone.
 3. Scan the QR code from `npm run pair` with the iPhone Camera and confirm, or enter the server address and token in the app's Settings.
+
+### 2b. Android
+
+1. Open the `android/` folder in Android Studio and run the **app** configuration on your phone (USB debugging on), or build from a terminal:
+
+   ```bash
+   cd android
+   ./gradlew assembleDebug
+   adb install app/build/outputs/apk/debug/app-debug.apk
+   ```
+
+   On Windows use `gradlew.bat assembleDebug`.
+2. Scan the QR code from `npm run pair` with the phone's camera (or Google Lens) and tap the link, then confirm; or enter the server address and token in the app's Settings. The token is stored encrypted with the Android Keystore.
+
+Before publishing your own build, set your own application id: add `tether.applicationId=io.github.yourname.tether` to `android/gradle.properties`.
 
 ## Configuration
 
@@ -151,6 +172,8 @@ Tether runs Claude Code through Anthropic's [Claude Agent SDK](https://code.clau
 - The phone shows the last 300 messages, each capped at 4,000 characters (Share transcript exports the full text).
 - Plan limits show only when Claude Code is logged in with a Claude subscription.
 - Live Activity updates while the app is closed need push notifications.
+- **Windows:** sessions open in the desktop app are matched by their `--resume` id. A plain `claude` started in a terminal without `--resume` is not detected on Windows, because Windows does not expose a process's working folder; it still appears in the list, just not under "Active now". Stop on PC ends the process (Windows has no Ctrl-C signal for other programs). The Windows server is covered by automated tests on a Windows machine (GitHub Actions), but has not yet been used day to day.
+- **Android app (first version):** session list with plan limits, live chat, approvals, sending and Continue here, and starting new sessions. Not yet in the Android app: usage charts, push notifications, slash commands, photo attachments, the changes view, and fork, rename, share and model settings.
 
 ## Development
 

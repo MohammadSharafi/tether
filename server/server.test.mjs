@@ -8,8 +8,8 @@ import { createApp, sumUsage, mapContent, displayInput } from './server.mjs';
 import { usageByDay, summarizeTranscript, transcriptCwd } from './usage.mjs';
 import { apnsJwt, buildPayload, buildActivityPayload, wantsNotification } from './push.mjs';
 import { listFolders, gitChanges, exportMarkdown, planFromUsage } from './extras.mjs';
-import { plist } from './setup.mjs';
-import { parseClaudeProcesses, runningSessions, followContinued, projectFolder } from './system.mjs';
+import { plist, windowsLauncher } from './setup.mjs';
+import { parseClaudeProcesses, parseWindowsProcesses, runningSessions, followContinued, projectFolder } from './system.mjs';
 import { execFileSync } from 'node:child_process';
 
 const TOKEN = 'test-token';
@@ -312,7 +312,7 @@ test('mapContent: text, tools with diff input, harness messages as meta, images 
   assert.equal(displayInput('ExitPlanMode', { plan: '# Plan' }).plan, '# Plan');
 });
 
-test('launchd plist is valid and runs this server at login with the user PATH', () => {
+test('launchd plist is valid and runs this server at login with the user PATH', { skip: process.platform !== 'darwin' && 'macOS only' }, () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'plist-')), 'a.plist');
   fs.writeFileSync(file, plist());
   assert.match(execFileSync('plutil', ['-lint', file], { encoding: 'utf8' }), /OK/);
@@ -640,4 +640,53 @@ test('Stop on Mac follows up with SIGTERM when Ctrl-C does not end the process',
     assert.deepEqual(await (await post(`/sessions/${SID}/stop-mac`, {})).json(), { ok: true, stopped: 1 });
     assert.deepEqual(signals.filter(([, sig]) => sig !== 0), [[398, 'SIGINT'], [398, 'SIGTERM']]);
   }, { scan, sdk, signal: (pid, sig) => signals.push([pid, sig]) });
+});
+
+test('Windows processes: desktop app and terminal sessions from Win32_Process JSON', () => {
+  const id = 'aaaaaaaa-1111-2222-3333-444444444444';
+  // Windows PowerShell 5.1 writes dates as /Date(ms)/; the desktop app runs a wrapper and a child with the same arguments.
+  const ps51 = JSON.stringify([
+    { ProcessId: 100, ParentProcessId: 4, CreationDate: '/Date(1792600000000)/',
+      CommandLine: `"C:\\Users\\dev\\AppData\\Roaming\\Claude\\claude-code\\2.1.295\\claude.exe" --output-format stream-json --resume=${id}` },
+    { ProcessId: 101, ParentProcessId: 100, CreationDate: '/Date(1792600000100)/',
+      CommandLine: `"C:\\Users\\dev\\AppData\\Roaming\\Claude\\claude-code\\2.1.295\\claude.exe" --output-format stream-json --resume=${id}` },
+    { ProcessId: 200, ParentProcessId: 50, CreationDate: '/Date(1792600500000)/',
+      CommandLine: 'C:\\Users\\dev\\.local\\bin\\claude.exe --resume bbbbbbbb-1111-2222-3333-444444444444' },
+    // npm install: node running cli.js; and unrelated node and Claude desktop processes
+    { ProcessId: 300, ParentProcessId: 60, CreationDate: '/Date(1792600900000)/',
+      CommandLine: '"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js' },
+    { ProcessId: 400, ParentProcessId: 60, CreationDate: '/Date(1792600900000)/', CommandLine: '"C:\\Program Files\\nodejs\\node.exe" server.js' },
+    { ProcessId: 500, ParentProcessId: 1, CreationDate: '/Date(1792600900000)/', CommandLine: '"C:\\Users\\dev\\AppData\\Local\\AnthropicClaude\\app-1.0\\Claude.exe"' },
+  ]);
+  const rows = parseWindowsProcesses(ps51);
+  assert.deepEqual(rows.map((r) => [r.pid, r.source, r.sessionId ?? null]), [
+    [100, 'desktop', id], [200, 'terminal', 'bbbbbbbb-1111-2222-3333-444444444444'], [300, 'terminal', null],
+  ]);
+  assert.equal(rows[0].startedAt, 1792600000000);
+  // PowerShell 7 writes ISO dates, and a single process comes back as an object, not an array.
+  const ps7 = JSON.stringify({ ProcessId: 7, ParentProcessId: 1, CreationDate: '2026-10-22T09:00:00+00:00', CommandLine: `claude.exe --resume=${id}` });
+  assert.deepEqual(parseWindowsProcesses(ps7).map((r) => [r.pid, r.startedAt]), [[7, Date.parse('2026-10-22T09:00:00+00:00')]]);
+  assert.deepEqual(parseWindowsProcesses(''), []);
+  assert.deepEqual(parseWindowsProcesses('not json'), []);
+  // runningSessions on Windows: by --resume id; a session without an id cannot be matched to a folder there.
+  const running = runningSessions([], { platform: 'win32', winJson: ps51, excludeParent: 0 });
+  assert.deepEqual([...running.keys()].sort(), [id, 'bbbbbbbb-1111-2222-3333-444444444444']);
+  assert.deepEqual(running.get(id).pids, [100]);
+});
+
+test('Windows login item: hidden Startup launcher that restarts the server', () => {
+  const w = windowsLauncher({ node: 'C:\\Program Files\\nodejs\\node.exe', dir: 'C:\\Users\\dev\\tether\\server', state: 'C:\\Users\\dev\\.tether',
+    env: { PORT: '8787', CLAUDE_CONFIG_DIR: 'C:\\Users\\dev\\.claude-100%' } });
+  const lines = w.cmd.split('\r\n');
+  assert.equal(w.cmdPath, 'C:\\Users\\dev\\.tether\\start.cmd');
+  assert.ok(lines.includes('set "PORT=8787"'));
+  assert.ok(lines.includes('set "CLAUDE_CONFIG_DIR=C:\\Users\\dev\\.claude-100%%"'), 'percent signs escaped for cmd');
+  assert.ok(lines.includes('cd /d "C:\\Users\\dev\\tether\\server"'));
+  const run = lines.indexOf(':loop');
+  assert.equal(lines[run + 1], '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\dev\\tether\\server\\server.mjs" >> "C:\\Users\\dev\\.tether\\server.log" 2>&1');
+  assert.equal(lines[run + 3], 'goto loop');
+  // hidden window (style 0), not waiting
+  assert.equal(w.vbs, 'CreateObject("WScript.Shell").Run """C:\\Users\\dev\\.tether\\start.cmd""", 0, False\r\n');
+  // without CLAUDE_CONFIG_DIR no empty variable is set
+  assert.ok(!windowsLauncher({ env: {} }).cmd.includes('CLAUDE_CONFIG_DIR'));
 });
