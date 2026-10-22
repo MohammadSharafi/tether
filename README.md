@@ -9,6 +9,15 @@ Tether is two small pieces that you run yourself:
 
 Everything stays between your Mac and your phone. There is no Tether cloud service and no account.
 
+<p align="center">
+  <img src="docs/screenshots/sessions.png" width="200" alt="Session list with plan limits, a session that needs approval and one open in the desktop app">
+  <img src="docs/screenshots/chat.png" width="200" alt="A session with tool steps and a file edit shown as a diff">
+  <img src="docs/screenshots/approval.png" width="200" alt="An approval card with Allow and Deny">
+  <img src="docs/screenshots/usage.png" width="200" alt="Token usage per day and per project">
+</p>
+
+**New here? Follow the step-by-step [Setup guide](docs/GUIDE.md)** (about 20 minutes).
+
 > Tether is an independent open-source project. It is **not affiliated with, endorsed by, or sponsored by Anthropic**. "Claude" and "Claude Code" are trademarks of Anthropic, PBC, used here only to describe what Tether works with.
 
 ## What it does
@@ -35,6 +44,8 @@ Everything stays between your Mac and your phone. There is no Tether cloud servi
   - a **paid Apple Developer account** gives longer installs, push notifications and Live Activity updates while the app is closed.
 
 ## Setup
+
+The short version is below. The [Setup guide](docs/GUIDE.md) covers every step in detail, with troubleshooting.
 
 ### 1. Mac
 
@@ -133,9 +144,10 @@ Tether runs Claude Code through Anthropic's [Claude Agent SDK](https://code.clau
 
 ## Limits
 
-- A session running in the desktop app or a terminal is read-only from the phone (two writers on one session would conflict). Use **Stop on Mac** first, then continue it from the phone.
-- "Running on your Mac" comes from the process list: a Claude Code process started with `--resume <id>` (the desktop app always does this) is matched exactly; a plain `claude` in a terminal is matched to the newest session in its folder.
+- A session open in the desktop app or a terminal updates live on the phone. Sending a message from the phone asks first, then stops it on the Mac (two writers on one session would conflict) and continues it on the phone. Reopen it on the Mac later to see the new messages.
+- "Running on your Mac" comes from the process list: a Claude Code process started with `--resume <id>` (the desktop app always does this) is matched to that session, or to its newest transcript when Claude Code has moved the chat to a new file (same folder and title, written since the process started); a plain `claude` in a terminal is matched to the newest session in its folder.
 - Live sessions close after 30 minutes idle; the next message resumes them.
+- A session continued from the phone runs in the Tether server. Restarting the server (for example `npm run setup`) ends it; the next message resumes it. The desktop app shows the phone's messages after you reopen the session there.
 - The phone shows the last 300 messages, each capped at 4,000 characters (Share transcript exports the full text).
 - Plan limits show only when Claude Code is logged in with a Claude subscription.
 - Live Activity updates while the app is closed need push notifications.

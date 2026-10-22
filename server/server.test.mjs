@@ -9,7 +9,7 @@ import { usageByDay, summarizeTranscript, transcriptCwd } from './usage.mjs';
 import { apnsJwt, buildPayload, buildActivityPayload, wantsNotification } from './push.mjs';
 import { listFolders, gitChanges, exportMarkdown, planFromUsage } from './extras.mjs';
 import { plist } from './setup.mjs';
-import { parseClaudeProcesses, runningSessions, projectFolder } from './system.mjs';
+import { parseClaudeProcesses, runningSessions, followContinued, projectFolder } from './system.mjs';
 import { execFileSync } from 'node:child_process';
 
 const TOKEN = 'test-token';
@@ -392,7 +392,7 @@ test('stop on Mac signals only the processes running that session; continuing it
     assert.equal((await post('/sessions/22222222-2222-3333-4444-555555555555/stop-mac', {})).status, 404);
     assert.equal((await post('/sessions/not-an-id/stop-mac', {})).status, 400);
     assert.equal(signals.length, 2);
-  }, { scan, signal: (pid, sig) => signals.push([pid, sig]) });
+  }, { scan, signal: (pid, sig) => { if (sig === 0) throw new Error('exited'); signals.push([pid, sig]); } });
 });
 
 test('every sessions folder is listed; a session resumes with its own folder; login state per folder', async () => {
@@ -598,4 +598,46 @@ test('a model that needs usage credits becomes a clear notice', async () => {
     const events = await readEvents(await call(`/sessions/${id}/events`), async (e) => e.kind === 'result');
     assert.equal(events.find((e) => e.kind === 'notice')?.status, 'credits');
   }, { sdk });
+});
+
+test('a continued session is shown as running under its newest copy', () => {
+  const base = { dir: '/c', cwd: '/w', firstPrompt: 'build an app', createdAt: 1000 };
+  const list = [ // newest first, like listSessions
+    { ...base, sessionId: 'new', createdAt: 1100, lastModified: 9000 },
+    { ...base, sessionId: 'fork-elsewhere', cwd: '/other', lastModified: 8500 },
+    { ...base, sessionId: 'old', lastModified: 8000 },
+    { ...base, sessionId: 'unrelated', firstPrompt: 'other', lastModified: 7000 },
+    { ...base, sessionId: 'stale', lastModified: 100 },
+  ];
+  const run = (startedAt) => ({ pids: [1], source: 'desktop', startedAt });
+  assert.deepEqual([...followContinued(new Map([['old', run(5000)]]), list).keys()], ['new']);
+  // A copy written before the process started is not its continuation.
+  assert.deepEqual([...followContinued(new Map([['stale', run(9500)]]), list).keys()], ['stale']);
+  // Another process running the newer copy, or this server running it, keeps the ids apart.
+  assert.deepEqual([...followContinued(new Map([['old', run(5000)], ['new', run(5000)]]), list).keys()].sort(), ['new', 'old']);
+  assert.deepEqual([...followContinued(new Map([['old', run(5000)]]), list, new Set(['new'])).keys()], ['old']);
+  // Sessions missing from the list, or without a first prompt, stay as they are.
+  assert.deepEqual([...followContinued(new Map([['gone', run(5000)]]), list).keys()], ['gone']);
+  assert.deepEqual([...followContinued(new Map([['old', run(5000)]]), list.map((x) => ({ ...x, firstPrompt: undefined }))).keys()], ['old']);
+  // Reopened in the desktop app: a transcript with the same title, written since the process started.
+  const reopened = [
+    { dir: '/c', cwd: '/w', sessionId: 'fresh', customTitle: 'Perf', createdAt: 1_000, lastModified: 900_000 },
+    { dir: '/c', cwd: '/w', sessionId: 'other', customTitle: 'Other', createdAt: 700_000, lastModified: 890_000 },
+    { dir: '/c', cwd: '/w', sessionId: 'quiet', customTitle: 'Perf', createdAt: 2_000, lastModified: 500_000 },
+    { dir: '/c', cwd: '/w', sessionId: 'orig', customTitle: 'Perf', createdAt: 900, lastModified: 400_000 },
+  ];
+  assert.deepEqual([...followContinued(new Map([['orig', run(600_000)]]), reopened).keys()], ['fresh']);
+  // A same-titled transcript last written before the process started is not where it writes.
+  assert.deepEqual([...followContinued(new Map([['orig', run(600_000)]]), reopened.filter((x) => x.sessionId !== 'fresh')).keys()], ['orig']);
+});
+
+test('Stop on Mac follows up with SIGTERM when Ctrl-C does not end the process', async () => {
+  const signals = [];
+  const scan = () => new Map([[SID, { pids: [398], source: 'terminal', cwd: '/tmp', startedAt: 0 }]]);
+  const sdk = fakeSdk();
+  sdk.listSessions = async () => [{ sessionId: SID, summary: 's', cwd: '/tmp', lastModified: 1 }];
+  await withServer(async ({ post }) => {
+    assert.deepEqual(await (await post(`/sessions/${SID}/stop-mac`, {})).json(), { ok: true, stopped: 1 });
+    assert.deepEqual(signals.filter(([, sig]) => sig !== 0), [[398, 'SIGINT'], [398, 'SIGTERM']]);
+  }, { scan, sdk, signal: (pid, sig) => signals.push([pid, sig]) });
 });

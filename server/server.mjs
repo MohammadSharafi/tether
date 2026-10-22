@@ -8,7 +8,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { addUsage, emptyUsage, usageByDay, transcriptCwd } from './usage.mjs';
-import { configDirs, runningSessions, loginStatus, AUTH_FAILURE, CREDITS_NEEDED } from './system.mjs';
+import { configDirs, runningSessions, followContinued, loginStatus, AUTH_FAILURE, CREDITS_NEEDED } from './system.mjs';
 import { createPusher } from './push.mjs';
 import { listFolders, gitChanges, exportMarkdown, planFromUsage } from './extras.mjs';
 
@@ -241,11 +241,14 @@ export function createApp({
     for (const dir of dirs()) {
       for (const x of await inDir(dir, () => sdk.listSessions({ limit: 200 }))) {
         sessionDir.set(x.sessionId, dir);
-        all.push({ ...x, dir });
+        all.push({ ...x, cwd: x.cwd ?? transcriptCwd(x.sessionId, dir), dir }); // the SDK leaves cwd out for some transcripts
       }
     }
     return all.sort((a, b) => b.lastModified - a.lastModified).slice(0, 300);
   }
+
+  // Sessions running on this Mac outside this server, keyed by their newest transcript.
+  const macSessions = (list) => followContinued(scan(dirs()), list, new Set(live.keys()));
 
   async function dirOf(id) {
     if (!sessionDir.has(id)) await listAll();
@@ -507,14 +510,14 @@ export function createApp({
 
     if (req.method === 'GET' && !id) {
       const list = await listAll();
-      const running = scan(dirs()); // sessions running on this Mac outside this server
+      const running = macSessions(list);
       const known = new Set(list.map((x) => x.sessionId));
       const fresh = [...live.values()].filter((x) => !known.has(x.id))
         .map((x) => ({ id: x.id, title: x.title, cwd: x.cwd, updated: Date.now(), state: x.state, dir: sessionDir.get(x.id) }));
       return json(res, 200, [...fresh, ...list.map((x) => {
         const mac = !live.has(x.sessionId) && running.get(x.sessionId);
         return {
-          id: x.sessionId, title: x.customTitle ?? x.summary, cwd: x.cwd ?? transcriptCwd(x.sessionId, x.dir),
+          id: x.sessionId, title: x.customTitle ?? x.summary, cwd: x.cwd,
           branch: x.gitBranch, updated: x.lastModified, dir: x.dir,
           state: live.get(x.sessionId)?.state ?? (mac ? 'active' : null),
           ...(mac && { mac: { source: mac.source, working: Date.now() - x.lastModified < WORKING_MS, since: mac.startedAt } }),
@@ -546,7 +549,7 @@ export function createApp({
 
     if (req.method === 'DELETE' && id && !sub) {
       if (s) throw new HttpError(409, 'Stop the session before deleting it.');
-      if (scan(dirs()).has(id)) throw new HttpError(409, 'This session is running on your Mac. Stop it first.');
+      if (macSessions(await listAll()).has(id)) throw new HttpError(409, 'This session is running on your Mac. Stop it first.');
       const dir = await dirOf(id);
       await inDir(dir, () => sdk.deleteSession(id));
       return json(res, 204);
@@ -572,7 +575,7 @@ export function createApp({
       if (!target) {
         const info = await findSession(id);
         if (!info?.cwd) throw new HttpError(404, 'Session not found.');
-        if (scan(dirs()).has(id)) throw new HttpError(409, 'This session is running on your Mac. Stop it there first, or use Stop on Mac.');
+        if (macSessions(await listAll()).has(id)) throw new HttpError(409, 'This session is running on your Mac. Stop it there first, or use Stop on Mac.');
         target = startLive(id, info.cwd, { resume: true, ...settings(body), title: info.customTitle ?? info.summary, dir: info.dir });
       }
       send(target, msg);
@@ -604,9 +607,13 @@ export function createApp({
     // Stops a session running in the desktop app or Terminal: SIGINT, like pressing Ctrl-C there.
     // Only processes the scan just tied to this session id are signalled; the phone never sends a pid.
     if (req.method === 'POST' && sub === 'stop-mac') {
-      const mac = scan(dirs()).get(id);
+      const mac = macSessions(await listAll()).get(id);
       if (!mac) throw new HttpError(404, 'This session is not running on your Mac.');
       for (const pid of mac.pids) signal(pid, 'SIGINT');
+      // Claude Code in a terminal only asks for a second Ctrl-C, so whatever still runs after 3 s gets SIGTERM.
+      const alive = () => mac.pids.filter((pid) => { try { signal(pid, 0); return true; } catch { return false; } });
+      for (let i = 0; i < 6 && alive().length; i++) await new Promise((r) => setTimeout(r, 500));
+      for (const pid of alive()) signal(pid, 'SIGTERM');
       return json(res, 200, { ok: true, stopped: mac.pids.length });
     }
 
@@ -661,6 +668,12 @@ export function createApp({
 
   return http.createServer(async (req, res) => {
     if (!authorized(req)) return json(res, 401, { error: 'Missing or wrong token.' });
+    const started = Date.now();
+    // Slow requests are what the phone feels as "loading"; log them (event streams are long by design).
+    res.on('finish', () => {
+      const ms = Date.now() - started;
+      if (ms > 1000 && !req.url.endsWith('/events') && !req.url.includes('/events?')) console.log(`slow ${req.method} ${req.url.split('?')[0]} ${ms} ms`);
+    });
     try {
       await route(req, res);
     } catch (err) {

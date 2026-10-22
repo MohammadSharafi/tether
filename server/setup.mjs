@@ -94,7 +94,11 @@ if (!process.argv[1] || import.meta.url !== pathToFileURL(process.argv[1]).href)
     fs.mkdirSync(path.dirname(plistPath), { recursive: true });
     fs.writeFileSync(plistPath, plist());
     launchctl('bootout', `gui/${uid}/${LABEL}`); // restart if already installed
-    if (!launchctl('bootstrap', `gui/${uid}`, plistPath)) throw new Error(`launchctl could not load ${plistPath}`);
+    // bootout returns before the old job is gone, and bootstrap fails until it is: retry for up to 10 s.
+    const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    let loaded = false;
+    for (let i = 0; i < 20 && !(loaded = launchctl('bootstrap', `gui/${uid}`, plistPath)); i++) sleep(500);
+    if (!loaded) throw new Error(`launchctl could not load ${plistPath}`);
     console.log(`Server installed: starts at login, restarts if it stops. Log: ${path.join(STATE_DIR, 'server.log')}`);
     if (cli) {
       execFileSync(cli, ['serve', '--bg', String(PORT)], { stdio: 'inherit' });

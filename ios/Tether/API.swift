@@ -265,14 +265,18 @@ final class Client {
         didSet { Task { await registerDevice() } }
     }
 
+    /// The last copy of each session read in this run, so reopening one shows it at once.
+    /// shortcut: kept in memory only (a few hundred KB per session), add a disk cache if cold starts feel slow.
+    @ObservationIgnored var detailCache: [String: SessionDetail] = [:]
+
     var isConfigured: Bool { URL(string: baseURL)?.host != nil && !token.isEmpty }
 
-    private func makeRequest(_ path: String, method: String = "GET", body: [String: Any]? = nil) throws -> URLRequest {
+    private func makeRequest(_ path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 30) throws -> URLRequest {
         let root = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard let url = URL(string: root + path) else { throw APIError(message: "Invalid server address.") }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = 30
+        req.timeoutInterval = timeout
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -282,16 +286,18 @@ final class Client {
     }
 
     @discardableResult
-    private func call(_ path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> Data {
+    private func call(_ path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 30) async throws -> Data {
         let data: Data, response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: makeRequest(path, method: method, body: body))
+            (data, response) = try await URLSession.shared.data(for: makeRequest(path, method: method, body: body, timeout: timeout))
         } catch let error as URLError {
             // A cancelled request (view went away, app paused) is not a failure to show.
             if error.code == .cancelled { throw CancellationError() }
             throw APIError(message: "Can't reach your Mac. Check that it's awake and on Tailscale.")
         }
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        // Tailscale answers for the Mac when the Tether server itself is restarting or stopped.
+        if [502, 503, 504].contains(code) { throw APIError(message: "Tether on your Mac is not answering. Retrying…") }
         guard (200..<300).contains(code) else {
             let msg = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
             throw APIError(message: msg ?? "Your Mac returned error \(code).")
@@ -299,8 +305,8 @@ final class Client {
         return data
     }
 
-    private func decode<T: Decodable>(_ type: T.Type, _ path: String) async throws -> T {
-        try JSONDecoder().decode(T.self, from: await call(path))
+    private func decode<T: Decodable>(_ type: T.Type, _ path: String, timeout: TimeInterval = 30) async throws -> T {
+        try JSONDecoder().decode(T.self, from: await call(path, timeout: timeout))
     }
 
     func loadInfo() async throws {
@@ -309,7 +315,8 @@ final class Client {
     }
 
     func sessions() async throws -> [SessionSummary] { try await decode([SessionSummary].self, "/sessions") }
-    func detail(_ id: String) async throws -> SessionDetail { try await decode(SessionDetail.self, "/sessions/\(id)") }
+    // The Mac answers in well under a second; a short timeout turns a dead connection into a quick retry.
+    func detail(_ id: String) async throws -> SessionDetail { try await decode(SessionDetail.self, "/sessions/\(id)", timeout: 10) }
     func usage(days: Int) async throws -> UsageReport { try await decode(UsageReport.self, "/usage?days=\(days)") }
 
     private func payload(text: String, images: [Attachment], mode: String?, model: String?, effort: String? = nil) -> [String: Any] {
@@ -388,7 +395,7 @@ final class Client {
             let task = Task {
                 do {
                     var req = try makeRequest("/sessions/\(id)/events?after=\(after)")
-                    req.timeoutInterval = 300
+                    req.timeoutInterval = 60 // the Mac sends a ping every 25 s, so silence means the connection is gone
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                         throw APIError(message: "Session is not live.")

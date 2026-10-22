@@ -94,6 +94,27 @@ export function runningSessions(dirs, { ps, cwdOf = cwds, excludeParent = proces
   return sessions;
 }
 
+// The desktop app keeps a session's --resume id while Claude Code writes the chat to a transcript with a
+// new id (after reopening, or when the context fills up). The new transcript keeps the title, or is a copy
+// of the history with the same first prompt and start time, and is written after the process started.
+// A running session is moved to its newest such transcript. `list` is the session list, newest first;
+// ids in `skip` (sessions this server runs) are never targets.
+export function followContinued(running, list, skip = new Set()) {
+  const byId = new Map(list.map((x) => [x.sessionId, x]));
+  const title = (x) => x.customTitle ?? x.summary;
+  const continues = (y, x) => (x.firstPrompt && y.firstPrompt === x.firstPrompt && Math.abs(y.createdAt - x.createdAt) < 2000)
+    || (title(x) && title(y) === title(x));
+  const out = new Map();
+  for (const [id, run] of running) {
+    const x = byId.get(id);
+    const newest = x && list.find((y) => y.sessionId === id || (y.dir === x.dir && y.cwd === x.cwd
+      && y.lastModified >= run.startedAt && continues(y, x) && !skip.has(y.sessionId) && !running.has(y.sessionId)));
+    const to = newest ? newest.sessionId : id;
+    if (!out.has(to)) out.set(to, run);
+  }
+  return out;
+}
+
 // `claude auth status --json` for one config folder; null when the claude command is not installed.
 export function loginStatus(dir) {
   return new Promise((resolve) => {

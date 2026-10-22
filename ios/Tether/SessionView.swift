@@ -26,43 +26,77 @@ final class SessionModel {
     var pendingCount: Int { isLive ? events.filter { $0.kind == "permission" && decided[$0.requestID ?? ""] == nil }.count : 0 }
     var turnsFinished: Int { events.filter { $0.kind == "result" }.count }
 
-    func load(_ client: Client, id: String) async {
+    /// Returns false when the session could not be read, so the caller can try again.
+    @discardableResult
+    func load(_ client: Client, id: String) async -> Bool {
         self.client = client
         self.id = id
+        // Seen before in this run: show that copy at once while the fresh one loads.
+        if !loaded, let cached = client.detailCache[id] {
+            show(cached)
+            loaded = true
+        }
         do {
-            let d = try await client.detail(id)
-            events = []
-            decided = [:]
-            streaming = ""
-            d.events.forEach(apply)
-            usage = d.usage
-            state = d.state
-            if let m = d.mode { mode = m }
-            if let e = d.effort { effort = e }
-            model = d.model ?? model
-            lastSeq = d.seq
-            error = nil
+            try await read()
             if isLive { follow() }
+            loaded = true
+            return true
+        } catch is CancellationError where Task.isCancelled {
+            return false // the view went away or a newer load replaced this one
         } catch is CancellationError {
-            return
+            self.error = "Loading was interrupted. Retrying…"
         } catch {
             self.error = error.localizedDescription
         }
         loaded = true
+        return false
+    }
+
+    /// Reads the session from the Mac and shows it.
+    private func read() async throws {
+        guard let client else { return }
+        let d = try await client.detail(id)
+        client.detailCache[id] = d
+        show(d)
+        error = nil
+    }
+
+    private func show(_ d: SessionDetail) {
+        events = []
+        decided = [:]
+        streaming = ""
+        d.events.forEach(apply)
+        usage = d.usage
+        state = d.state
+        if let m = d.mode { mode = m }
+        if let e = d.effort { effort = e }
+        model = d.model ?? model
+        lastSeq = d.seq
     }
 
     /// Re-reads a session that runs elsewhere on the Mac; only touches the view when something changed.
     func refresh() async {
         guard let client, !isLive, let d = try? await client.detail(id) else { return }
-        if d.events.count != events.count || d.events.last?.text != events.last?.text {
-            events = []
-            d.events.forEach(apply)
+        client.detailCache[id] = d
+        // Keep the rows already shown (same ids, so the list does not jump) and add only the new ones.
+        // The server sends the last 300 events, so the old rows may have slid off the front.
+        let old = events.map { "\($0.kind)\($0.text ?? "")" }
+        let new = d.events.map { "\($0.kind)\($0.text ?? "")" }
+        if old != new {
+            if let k = old.indices.first(where: { Array(old[$0...]) == Array(new.prefix(old.count - $0)) }) {
+                events.removeFirst(k)
+                d.events.dropFirst(old.count - k).forEach(apply)
+            } else {
+                events = []
+                d.events.forEach(apply)
+            }
         }
         usage = d.usage
     }
 
-    func send(text: String, images: [Attachment]) async {
-        guard let client else { return }
+    @discardableResult
+    func send(text: String, images: [Attachment]) async -> Bool {
+        guard let client else { return false }
         do {
             let wasLive = isLive
             // Mode and model ride along when this message resumes the session.
@@ -70,8 +104,10 @@ final class SessionModel {
             // A resumed session restarts its event numbering, so read it from the start.
             if !wasLive { lastSeq = 0; state = "running" }
             follow()
+            return true
         } catch {
             self.error = error.localizedDescription
+            return false
         }
     }
 
@@ -112,13 +148,22 @@ final class SessionModel {
         guard stream == nil, let client else { return }
         let id = id
         stream = Task {
+            var dropped = false
             do {
                 for try await e in client.events(id, after: lastSeq) { apply(e) }
             } catch is CancellationError {
             } catch {
-                if !Task.isCancelled { self.error = error.localizedDescription }
+                if !Task.isCancelled { self.error = error.localizedDescription; dropped = true }
             }
+            // The connection dropped (Mac restarting, network change): reconnect by reading the
+            // session again until it works. `stream` stays set meanwhile, so stop() still cancels this.
+            while dropped && !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                if !Task.isCancelled, (try? await read()) != nil { break }
+            }
+            let resume = dropped && !Task.isCancelled && isLive
             stream = nil
+            if resume { follow() }
         }
     }
 
@@ -178,6 +223,10 @@ struct SessionView: View {
     @State private var newTitle = ""
     @State private var shownTitle: String?
     @State private var confirmStop = false
+    @State private var pendingSend: PendingSend?
+    @State private var askContinue = false
+    @State private var backgrounded = false
+    @State private var loadAttempt = 0
     @State private var showChanges = false
     @State private var showCommands = false
     @State private var commands: [SlashCommand]?
@@ -207,6 +256,12 @@ struct SessionView: View {
         } message: {
             Text("Claude Code stops in the \(mac?.place ?? "Mac"), like pressing Ctrl-C there. Then you can continue it from here.")
         }
+        .confirmationDialog("Continue this chat on your phone?", isPresented: $askContinue, titleVisibility: .visible, presenting: pendingSend) { p in
+            Button("Continue here") { Task { await continueHere(p) } }
+            Button("Cancel", role: .cancel) { restore(p.text, p.images) }
+        } message: { _ in
+            Text("It is open in the \(mac?.place ?? "Mac"). Tether stops it there first, like pressing Ctrl-C, then sends your message. Reopen it on the Mac later to see the new messages.")
+        }
         .sensoryFeedback(.warning, trigger: model.pendingCount) { old, new in haptics && new > old }
         .sensoryFeedback(.success, trigger: model.turnsFinished) { old, new in haptics && new > old && old > 0 }
         .sheet(isPresented: $showChanges) { ChangesView(id: id) }
@@ -217,15 +272,31 @@ struct SessionView: View {
         .sheet(item: $share) { ShareSheet(url: $0.url).presentationDetents([.medium, .large]) }
         .onChange(of: draft) { if draft.hasPrefix("/") && commands == nil { Task { await loadCommands() } } }
         .onAppear { model.title = shownTitle ?? title ?? "Session" }
-        // Restarts when the session starts or stops running on the Mac, so following and sending switch over.
-        .task(id: "\(scenePhase)\(runningElsewhere)") {
-            guard scenePhase == .active else { model.stop(); return }
-            await model.load(client, id: id)
-            // Follow a session that runs in Terminal or the desktop app by re-reading its transcript.
+        // Loads once per visit, so a moment of "inactive" (an alert, Control Center) never cancels it.
+        // A new attempt (back from the background, Try again) cancels a load that may be hanging.
+        .task(id: loadAttempt) {
+            // A phone on the move drops requests now and then: keep trying until the session loads.
+            while !Task.isCancelled, !(await model.load(client, id: id)) {
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+        // Back from the background: the event stream was stopped, so read the session again.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { model.stop(); backgrounded = true }
+            if phase == .active && backgrounded {
+                backgrounded = false
+                loadAttempt += 1
+            }
+        }
+        // Follow a session that runs in Terminal or the desktop app by re-reading its transcript.
+        // Kept apart from the load above, so the Mac status flipping never cancels the first load.
+        .task(id: runningElsewhere) {
             while runningElsewhere && !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
-                await model.refresh()
+                if scenePhase == .active && model.loaded { await model.refresh() }
             }
+            // It stopped running on the Mac: read the final transcript once.
+            if !Task.isCancelled && model.loaded && !model.isLive { await model.load(client, id: id) }
         }
         .onDisappear { model.stop() }
     }
@@ -280,37 +351,67 @@ struct SessionView: View {
     private var screen: some View {
         transcript
         .scrollDismissesKeyboard(.interactively)
-        .overlay { if !model.loaded { ProgressView() } }
+        .overlay {
+            if !model.loaded {
+                Loading { loadAttempt += 1 }
+            } else if model.events.isEmpty, let error = model.error {
+                // Nothing to show yet, so the problem goes in the middle of the screen. It keeps retrying.
+                ContentUnavailableView {
+                    Label("Can't load this session", systemImage: "wifi.exclamationmark")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("Try again") { loadAttempt += 1 }
+                }
+            }
+        }
         .safeAreaInset(edge: .bottom) { composer }
         .navigationTitle(shownTitle ?? title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.visible, for: .navigationBar) // the flipped list never reports "scrolled", so keep the bar opaque
         .toolbar {
             ToolbarItem(placement: .principal) { titleView }
             ToolbarItem(placement: .topBarTrailing) { menu }
         }
     }
 
-    // Chat-style list: the scroll view is flipped so it opens at the newest event.
-    // defaultScrollAnchor(.bottom) lands on blank space in long LazyVStacks with uneven rows.
+    // Chat-style list in natural order, kept pinned to the newest event.
     private var transcript: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                if let error = model.error {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.footnote).foregroundStyle(.red).flipped()
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if model.loaded { SessionHeader(model: model) }
+                    ForEach(model.events) { e in
+                        EventRow(event: e, model: model)
+                    }
+                    if !model.streaming.isEmpty {
+                        MarkdownText(text: model.streaming + " ▍")
+                    }
+                    if let error = model.error, !model.events.isEmpty { // an empty session shows it mid-screen
+                        HStack {
+                            Label(error, systemImage: "exclamationmark.triangle")
+                                .font(.footnote).foregroundStyle(.red)
+                            Spacer(minLength: 0)
+                            Button("Try again") { loadAttempt += 1 }
+                                .font(.footnote.bold())
+                        }
+                    }
+                    Color.clear.frame(height: 1).id("bottom")
                 }
-                if !model.streaming.isEmpty {
-                    MarkdownText(text: model.streaming + " ▍").flipped()
-                }
-                ForEach(model.events.reversed()) { e in
-                    EventRow(event: e, model: model).flipped()
-                }
-                if model.loaded { SessionHeader(model: model).flipped() }
+                .padding()
             }
-            .padding()
+            .defaultScrollAnchor(.bottom)
+            .modifier(StayAtBottom())
+            // A fresh list of messages gets a fresh scroll view, so it opens at the newest message
+            // (lazy rows only guess their heights, and a late scroll can land in empty space).
+            .id(model.events.first?.id)
+            // Lazy rows guess their heights, so the first jump can land short; jump again once they are measured.
+            .task(id: model.events.count) {
+                for delay in [0, 150, 400] {
+                    try? await Task.sleep(for: .milliseconds(delay))
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
         }
-        .flipped()
     }
 
     private var titleView: some View {
@@ -386,21 +487,50 @@ struct SessionView: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
     }
 
+    /// Sends a message. A session open on the Mac is stopped there first, after the user agrees,
+    /// because two programs writing one session would split it. A failed message goes back into the box.
+    private func submit(_ text: String, _ images: [Attachment]) {
+        if runningElsewhere && !model.isLive {
+            pendingSend = PendingSend(text: text, images: images)
+            askContinue = true
+            return
+        }
+        Task {
+            if !(await model.send(text: text, images: images)) { restore(text, images) }
+        }
+    }
+
+    private func continueHere(_ p: PendingSend) async {
+        do {
+            try await client.stopOnMac(id)
+            // Wait for the Mac process to exit; the server refuses the message while it runs.
+            for _ in 0..<10 {
+                try await Task.sleep(for: .seconds(1))
+                if try await client.sessions().first(where: { $0.id == id })?.mac == nil { break }
+            }
+        } catch {
+            model.error = error.localizedDescription
+        }
+        if await model.send(text: p.text, images: p.images) {
+            client.listVersion += 1
+        } else {
+            restore(p.text, p.images)
+        }
+    }
+
+    private func restore(_ text: String, _ images: [Attachment]) {
+        if draft.isEmpty { draft = text }
+        if attachments.isEmpty { attachments = images }
+    }
+
     private var composer: some View {
         VStack(spacing: 6) {
-            // Running on the Mac: you watch here, and can stop it to take over. No message box until then.
             if let mac, !model.isLive {
-                HStack(spacing: 12) {
-                    Label("Running in the \(mac.place). Updates appear here live.", systemImage: mac.icon)
-                        .font(.footnote).foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Button("Stop on Mac", role: .destructive) { confirmStop = true }
-                        .font(.footnote.bold()).buttonStyle(.bordered).fixedSize()
-                }
-                .padding(.vertical, 4)
-            } else {
-                composerField
+                Label("Open in the \(mac.place). Updates appear here live; send a message to continue it here.", systemImage: mac.icon)
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            composerField
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -412,7 +542,7 @@ struct SessionView: View {
             if draft.hasPrefix("/") && !draft.contains(" "), let commands {
                 CommandSuggestions(commands: commands, query: draft) { use($0) }
             } else if draft.isEmpty && attachments.isEmpty && !model.isBusy && model.loaded {
-                QuickReplyBar { reply in Task { await model.send(text: reply, images: []) } }
+                QuickReplyBar { reply in submit(reply, []) }
             }
             AttachmentStrip(attachments: $attachments)
             HStack(alignment: .bottom, spacing: 8) {
@@ -432,7 +562,7 @@ struct SessionView: View {
                         let text = draft, images = attachments
                         draft = ""
                         attachments = []
-                        Task { await model.send(text: text, images: images) }
+                        submit(text, images)
                     }
                     .labelStyle(.iconOnly).font(.title)
                     .disabled(!canSend)
@@ -948,6 +1078,37 @@ struct MarkdownText: View {
     }
 }
 
-extension View {
-    func flipped() -> some View { scaleEffect(x: 1, y: -1) }
+private struct PendingSend {
+    let text: String
+    let images: [Attachment]
+}
+
+/// The first load of a session. After a few seconds it explains and offers a retry.
+private struct Loading: View {
+    let retry: () -> Void
+    @State private var slow = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            if slow {
+                Text("Still loading. Check that your Mac is awake and on Tailscale.")
+                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                Button("Try again") { slow = false; retry() }
+            }
+        }
+        .padding(32)
+        .task(id: slow) {
+            guard !slow else { return }
+            try? await Task.sleep(for: .seconds(8))
+            if !Task.isCancelled { slow = true }
+        }
+    }
+}
+
+/// Keeps the newest message in view while lazy rows replace their guessed heights with real ones.
+private struct StayAtBottom: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) { content.defaultScrollAnchor(.bottom, for: .sizeChanges) } else { content }
+    }
 }
